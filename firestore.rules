@@ -1,0 +1,147 @@
+rules_version = '2';
+
+// Cotizador Móvil — Car Store Belgrano
+// There is no Firebase Auth yet, so these rules can't tell sellers apart:
+// they validate the shape of every write and protect quote numbering,
+// but per-seller history isolation is enforced by the app only.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSeller(id) {
+      return id in ['chino', 'damian', 'rulo'];
+    }
+
+    function sellerName(id) {
+      return {'chino': 'Chino', 'damian': 'Damian', 'rulo': 'Rulo'}[id];
+    }
+
+    function shortString(v) {
+      return v is string && v.size() <= 300;
+    }
+
+    function companyRef() {
+      return /databases/$(database)/documents/app_config/company;
+    }
+
+    function currentSequence() {
+      return exists(companyRef()) ? get(companyRef()).data.get('quoteSequence', 0) : 0;
+    }
+
+    // ---- app_config/company -----------------------------------------------
+    match /app_config/company {
+      allow read: if true;
+
+      allow create, update: if
+        request.resource.data.keys().hasOnly([
+          'brandName', 'logoUrl', 'phone', 'whatsapp', 'address',
+          'email', 'instagram', 'website', 'quoteSequence'
+        ])
+        && shortString(request.resource.data.get('brandName', ''))
+        && request.resource.data.get('logoUrl', '') is string
+        && request.resource.data.get('logoUrl', '').size() < 600000
+        && shortString(request.resource.data.get('phone', ''))
+        && shortString(request.resource.data.get('whatsapp', ''))
+        && shortString(request.resource.data.get('address', ''))
+        && shortString(request.resource.data.get('email', ''))
+        && shortString(request.resource.data.get('instagram', ''))
+        && shortString(request.resource.data.get('website', ''))
+        && request.resource.data.get('quoteSequence', 0) is int
+        // The sequence only ever stays the same or moves forward by exactly one.
+        && (
+          request.resource.data.get('quoteSequence', 0) == currentSequence()
+          || request.resource.data.get('quoteSequence', 0) == currentSequence() + 1
+        );
+
+      allow delete: if false;
+    }
+
+    // ---- products ---------------------------------------------------------
+    match /products/{productId} {
+      allow read: if true;
+
+      allow create, update: if
+        request.resource.data.keys().hasOnly([
+          'type', 'brand', 'model', 'lastPrice', 'updatedAt', 'searchKey', 'createdByUser'
+        ])
+        && shortString(request.resource.data.type)
+        && shortString(request.resource.data.brand)
+        && shortString(request.resource.data.model)
+        && request.resource.data.lastPrice is number
+        && request.resource.data.lastPrice >= 0
+        && request.resource.data.updatedAt is timestamp
+        && request.resource.data.searchKey is string
+        && request.resource.data.searchKey.size() <= 1000
+        && isSeller(request.resource.data.createdByUser);
+
+      // Sellers can remove saved suggestions (the app always asks for confirmation).
+      // Quotes keep their own copy of each item, so deleting a product never alters a quote.
+      allow delete: if true;
+    }
+
+    // ---- sessions: one device per seller ---------------------------------
+    // sessions/{userId} = { deviceId, deviceLabel, claimedAt, lastSeen }.
+    // A seller can be taken by another device only once the holder has been
+    // inactive for 12 hours. `lastSeen` must be the server time of the write.
+    function validSession(s) {
+      return s.keys().hasOnly(['deviceId', 'deviceLabel', 'claimedAt', 'lastSeen'])
+        && s.deviceId is string && s.deviceId.size() > 0 && s.deviceId.size() <= 100
+        && s.deviceLabel is string && s.deviceLabel.size() <= 100
+        && s.lastSeen == request.time;
+    }
+
+    match /sessions/{userId} {
+      allow read: if true;
+
+      allow create: if isSeller(userId) && validSession(request.resource.data);
+
+      allow update: if validSession(request.resource.data)
+        && (
+          // Heartbeat / re-claim from the same device.
+          request.resource.data.deviceId == resource.data.deviceId
+          // Takeover of an expired hold.
+          || resource.data.lastSeen < request.time - duration.value(12, 'h')
+        );
+
+      // "Cambiar Usuario" frees the seller (the app only deletes its own session).
+      allow delete: if true;
+    }
+
+    // ---- quotes -----------------------------------------------------------
+    function validQuote(q) {
+      return q.keys().hasOnly([
+          'quoteNumber', 'userId', 'userName', 'createdAt', 'status',
+          'items', 'totalAmount', 'notes', 'companyInfo'
+        ])
+        && q.quoteNumber is string
+        && q.quoteNumber.matches('COT-[0-9]{4}-[0-9]{4,}')
+        && isSeller(q.userId)
+        && q.userName == sellerName(q.userId)
+        && q.createdAt is timestamp
+        && q.status in ['saved', 'exported']
+        && q.items is list
+        && q.items.size() <= 200
+        && q.totalAmount is number
+        && (!('notes' in q) || (q.notes is string && q.notes.size() <= 5000))
+        && q.companyInfo is map;
+    }
+
+    match /quotes/{quoteId} {
+      // The app filters by userId; without Auth the rules cannot.
+      allow read: if true;
+
+      // New quotes must be created in the same transaction that bumps the sequence.
+      allow create: if validQuote(request.resource.data)
+        && getAfter(companyRef()).data.quoteSequence == currentSequence() + 1;
+
+      allow update: if validQuote(request.resource.data)
+        // Identity and numbering are immutable.
+        && request.resource.data.quoteNumber == resource.data.quoteNumber
+        && request.resource.data.userId == resource.data.userId
+        && request.resource.data.createdAt == resource.data.createdAt
+        // An exported quote never goes back to "saved".
+        && !(resource.data.status == 'exported' && request.resource.data.status == 'saved');
+
+      allow delete: if true;
+    }
+  }
+}
