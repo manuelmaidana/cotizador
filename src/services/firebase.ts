@@ -1,5 +1,6 @@
 import { initializeApp } from 'firebase/app';
 import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager } from 'firebase/firestore';
+import { missingFirebaseEnv } from '../lib/firebaseEnv';
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -11,8 +12,10 @@ const firebaseConfig = {
   measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID,
 };
 
-if (!firebaseConfig.apiKey || !firebaseConfig.projectId) {
-  throw new Error('Faltan las variables VITE_FIREBASE_* en .env.local');
+const missing = missingFirebaseEnv();
+if (missing.length) {
+  // main.tsx checks this first and shows a readable screen; this guards other entry points.
+  throw new Error(`Faltan variables de Firebase: ${missing.join(', ')}`);
 }
 
 export const app = initializeApp(firebaseConfig);
