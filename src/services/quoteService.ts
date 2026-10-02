@@ -4,7 +4,9 @@ import {
   doc,
   getDoc,
   getDocs,
+  limit,
   onSnapshot,
+  orderBy,
   query,
   runTransaction,
   Timestamp,
@@ -13,31 +15,28 @@ import {
   type DocumentData,
   type DocumentSnapshot,
 } from 'firebase/firestore';
-import type { AppUser, CompanyInfo, Quote, QuoteDraft, QuoteItem, QuoteStatus, UserId } from '../types';
+import {
+  MAX_QUOTE_ITEMS,
+  type AppUser,
+  type CompanyInfo,
+  type Quote,
+  type QuoteDraft,
+  type QuoteItem,
+  type QuoteStatus,
+  type UserId,
+} from '../types';
 import { sumItems } from '../lib/utils';
+import { UserFacingError, withRetry, withTimeout } from '../lib/errors';
 import { reserveQuoteSequence } from './companyService';
 import { COLLECTIONS, db } from './firebase';
-import { upsertProduct } from './productService';
+import { upsertProducts } from './productService';
 
 const quotesCol = collection(db, COLLECTIONS.quotes);
 
-const TRANSACTION_TIMEOUT_MS = 15_000;
-
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Firestore no respondió a tiempo')), ms);
-    promise.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (err) => {
-        clearTimeout(timer);
-        reject(err);
-      },
-    );
-  });
-}
+/** One attempt; a timed-out attempt is retried (safe: the draft's reserved ID is idempotent). */
+const TRANSACTION_TIMEOUT_MS = 12_000;
+/** Total time a seller may wait for a new quote number before seeing an error. */
+const SAVE_DEADLINE_MS = 40_000;
 
 export function formatQuoteNumber(sequence: number, date = new Date()): string {
   return `COT-${date.getFullYear()}-${String(sequence).padStart(4, '0')}`;
@@ -72,32 +71,79 @@ function fromDoc(snap: DocumentSnapshot<DocumentData>): Quote {
 
 /* ---- Queries -------------------------------------------------------------- */
 
-/**
- * History isolation: `where("userId", "==", userId)`.
- * Sorted client-side so no composite index (userId + createdAt) is required.
- */
-export async function listQuotesByUser(userId: UserId): Promise<Quote[]> {
-  const snap = await getDocs(query(quotesCol, where('userId', '==', userId)));
-  return snap.docs.map(fromDoc).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+const byNewest = (a: Quote, b: Quote) => b.createdAt.localeCompare(a.createdAt);
+
+/** Page size for the history: it grows by this much with each "Ver más". */
+export const HISTORY_PAGE_SIZE = 50;
+
+export interface QuotePage {
+  quotes: Quote[];
+  /** There may be older quotes beyond `limit`. */
+  hasMore: boolean;
 }
 
 /**
- * Live version of `listQuotesByUser`: the history updates as soon as a quote is
- * saved or exported on any device. Returns the unsubscribe function.
+ * Live history of one seller (`where("userId", "==", userId)`), newest first, limited to
+ * the `max` most recent quotes so it stays fast with thousands of quotes.
+ *
+ * Uses the composite index userId + createdAt (firestore.indexes.json). Until that index
+ * exists, Firestore rejects the query with `failed-precondition`; we then fall back to the
+ * unindexed query (all of the seller's quotes, sorted here) so the history never breaks.
  */
 export function subscribeQuotesByUser(
   userId: UserId,
-  onChange: (quotes: Quote[]) => void,
+  max: number,
+  onChange: (page: QuotePage) => void,
   onError?: (err: Error) => void,
 ): () => void {
-  return onSnapshot(
-    query(quotesCol, where('userId', '==', userId)),
-    (snap) => onChange(snap.docs.map(fromDoc).sort((a, b) => b.createdAt.localeCompare(a.createdAt))),
+  let unsubscribe = () => {};
+  let stopped = false;
+
+  const fallback = () => {
+    if (stopped) return;
+    console.warn('Falta el índice userId+createdAt en Firestore: se usa la consulta sin índice.');
+    unsubscribe = onSnapshot(
+      query(quotesCol, where('userId', '==', userId)),
+      (snap) => {
+        const all = snap.docs.map(fromDoc).sort(byNewest);
+        onChange({ quotes: all.slice(0, max), hasMore: all.length > max });
+      },
+      (err) => {
+        console.error('No se pudo leer el historial', err);
+        onError?.(err);
+      },
+    );
+  };
+
+  unsubscribe = onSnapshot(
+    // One extra document tells whether there's another page.
+    query(quotesCol, where('userId', '==', userId), orderBy('createdAt', 'desc'), limit(max + 1)),
+    (snap) => {
+      const quotes = snap.docs.map(fromDoc).sort(byNewest);
+      onChange({ quotes: quotes.slice(0, max), hasMore: quotes.length > max });
+    },
     (err) => {
+      if ((err as { code?: string }).code === 'failed-precondition') return fallback();
       console.error('No se pudo leer el historial', err);
       onError?.(err);
     },
   );
+
+  return () => {
+    stopped = true;
+    unsubscribe();
+  };
+}
+
+/**
+ * Finds a quote of this seller by its exact number (e.g. "COT-2026-0042"), wherever it is in
+ * the history — even beyond the loaded pages. Two equality filters: no index needed.
+ */
+export async function findQuoteByNumber(userId: UserId, quoteNumber: string): Promise<Quote | null> {
+  const snap = await getDocs(
+    query(quotesCol, where('userId', '==', userId), where('quoteNumber', '==', quoteNumber), limit(1)),
+  );
+  return snap.empty ? null : fromDoc(snap.docs[0]);
 }
 
 /** `false` only when the server confirms the quote is gone; `null` when it can't tell (offline). */
@@ -127,15 +173,41 @@ interface SaveQuoteInput {
   status: QuoteStatus;
 }
 
-/** Keeps `lastPrice` / `updatedAt` of every priced product in the quote up to date. */
+/** Keeps `lastPrice` / `updatedAt` of every priced product in the quote up to date (one batch). */
 function syncProducts(items: QuoteItem[], userId: UserId) {
-  for (const item of items) {
-    if (!item.model || item.unitPrice <= 0) continue;
-    void upsertProduct(
-      { type: item.type, brand: item.brand, model: item.model, lastPrice: item.unitPrice },
-      userId,
+  const priced = items
+    .filter((item) => item.model && item.unitPrice > 0)
+    .map((item) => ({ type: item.type, brand: item.brand, model: item.model, lastPrice: item.unitPrice }));
+  if (priced.length) void upsertProducts(priced, userId);
+}
+
+/** Firestore's hard limit is 1 MiB per document; keep a margin for field overhead. */
+const MAX_QUOTE_BYTES = 900_000;
+
+function assertFits(data: object) {
+  if (draftItemsOverLimit(data)) {
+    throw new UserFacingError(`Una cotización puede tener hasta ${MAX_QUOTE_ITEMS} ítems.`);
+  }
+  const bytes = new Blob([JSON.stringify(data)]).size;
+  if (bytes > MAX_QUOTE_BYTES) {
+    throw new UserFacingError(
+      'La cotización es demasiado grande para guardarse. Dividila en dos o usá un logo más liviano en Configuración de Empresa.',
     );
   }
+}
+
+function draftItemsOverLimit(data: object) {
+  const items = (data as { items?: unknown[] }).items;
+  return Array.isArray(items) && items.length > MAX_QUOTE_ITEMS;
+}
+
+/**
+ * Plain document writes resolve only when the server confirms them. Without signal that
+ * never happens, but the write is already safe in the offline cache and syncs later — so
+ * after a short wait we report success instead of leaving the seller waiting.
+ */
+async function settleWrite(write: Promise<void>, ms = 6000): Promise<void> {
+  await Promise.race([write, new Promise<void>((resolve) => setTimeout(resolve, ms))]);
 }
 
 /** Creates a new quote, or updates the existing one if the draft was already saved. */
@@ -146,6 +218,7 @@ export async function saveQuote({ draft, user, companyInfo, status }: SaveQuoteI
     notes: draft.notes.trim() || undefined,
     companyInfo,
   };
+  assertFits(base);
 
   if (draft.savedId) {
     const owned = await getOwnedQuote(draft.savedId, user.id);
@@ -153,7 +226,7 @@ export async function saveQuote({ draft, user, companyInfo, status }: SaveQuoteI
       const existing = fromDoc(owned.snap);
       // An exported quote never goes back to "saved".
       const nextStatus: QuoteStatus = existing.status === 'exported' ? 'exported' : status;
-      await updateDoc(owned.ref, { ...base, status: nextStatus });
+      await settleWrite(updateDoc(owned.ref, { ...base, status: nextStatus }));
       syncProducts(draft.items, user.id);
       return { ...existing, ...base, status: nextStatus };
     }
@@ -164,32 +237,64 @@ export async function saveQuote({ draft, user, companyInfo, status }: SaveQuoteI
   // so two sellers saving at the same time never get the same number.
   // Transactions need the server: fail fast instead of spinning forever without signal.
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
-    throw new Error('Sin conexión: el número de cotización necesita conexión a internet.');
+    throw new UserFacingError('Sin conexión: para numerar una cotización nueva hace falta internet.');
   }
-  const ref = doc(quotesCol);
-  const createdAt = Timestamp.now();
-  const created = await withTimeout(runTransaction(db, async (tx) => {
-    const { sequence } = await reserveQuoteSequence(tx);
-    const data: QuoteDoc = {
-      quoteNumber: formatQuoteNumber(sequence, createdAt.toDate()),
-      userId: user.id,
-      userName: user.name,
-      createdAt,
-      status,
-      ...base,
-    };
-    tx.set(ref, data);
-    return data;
-  }), TRANSACTION_TIMEOUT_MS);
 
+  // The draft's reserved ID makes this idempotent: if a previous attempt timed out but did
+  // commit, the retry finds that quote instead of creating a duplicate with a new number.
+  //
+  // Simultaneous saves: two sellers can read the same sequence. The security rules evaluate
+  // before Firestore's own conflict check, so the late transaction gets `permission-denied`
+  // (its number is already taken) rather than the retryable `aborted`. A fresh attempt
+  // re-reads the counter and takes the next number, so that case is retried too.
+  const ref = draft.pendingId ? doc(quotesCol, draft.pendingId) : doc(quotesCol);
+  const createdAt = Timestamp.now();
+  const { data, created } = await withRetry(
+    () =>
+    withTimeout(
+      runTransaction(db, async (tx) => {
+        const previous = await tx.get(ref);
+        if (previous.exists()) {
+          if (previous.data().userId !== user.id) throw new Error('ID de cotización en uso');
+          return { data: previous.data() as QuoteDoc, created: false };
+        }
+        const { sequence } = await reserveQuoteSequence(tx);
+        const fresh: QuoteDoc = {
+          quoteNumber: formatQuoteNumber(sequence, createdAt.toDate()),
+          userId: user.id,
+          userName: user.name,
+          createdAt,
+          status,
+          ...base,
+        };
+        tx.set(ref, fresh);
+        return { data: fresh, created: true };
+      }),
+      TRANSACTION_TIMEOUT_MS,
+    ),
+    { attempts: 6, alsoRetry: ['permission-denied', 'failed-precondition'], deadlineMs: SAVE_DEADLINE_MS },
+  );
+
+  if (!created) {
+    // Found from an earlier attempt: bring it up to date with the current draft.
+    await settleWrite(updateDoc(ref, { ...base }));
+  }
   syncProducts(draft.items, user.id);
-  return { id: ref.id, ...created, createdAt: createdAt.toDate().toISOString() };
+  return {
+    id: ref.id,
+    quoteNumber: data.quoteNumber,
+    userId: data.userId,
+    userName: data.userName,
+    createdAt: toIso(data.createdAt),
+    status: data.status,
+    ...base,
+  };
 }
 
 export async function markQuoteExported(id: string, userId: UserId): Promise<Quote | undefined> {
   const owned = await getOwnedQuote(id, userId);
   if (!owned) return undefined;
-  await updateDoc(owned.ref, { status: 'exported' });
+  await settleWrite(updateDoc(owned.ref, { status: 'exported' }));
   return { ...fromDoc(owned.snap), status: 'exported' };
 }
 

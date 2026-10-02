@@ -70,9 +70,17 @@ export interface Quote {
 export type ItemField = 'type' | 'brand' | 'model' | 'price';
 export type FieldToggles = Record<ItemField, boolean>;
 
+/** Limit per quote (also enforced by firestore.rules) — keeps documents well under 1 MB. */
+export const MAX_QUOTE_ITEMS = 200;
+
 /** In-progress quote. `savedId` is set once it has been persisted. */
 export interface QuoteDraft {
   savedId?: string;
+  /**
+   * Firestore ID reserved for this draft before its first save, so retrying a save
+   * after a timeout finds the quote already created instead of creating a duplicate.
+   */
+  pendingId?: string;
   quoteNumber?: string;
   createdAt?: IsoDate;
   /** Status of the persisted quote, once saved. */

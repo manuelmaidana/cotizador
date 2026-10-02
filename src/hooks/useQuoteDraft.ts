@@ -1,9 +1,15 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { Quote, QuoteDraft, QuoteItem, UserId } from '../types';
+import { MAX_QUOTE_ITEMS, type Quote, type QuoteDraft, type QuoteItem, type UserId } from '../types';
+import { generateId } from '../lib/utils';
 import { readJson, writeJson } from '../services/storage';
 import { quoteExists } from '../services/quoteService';
 
-const emptyDraft = (): QuoteDraft => ({ items: [], notes: '', dirty: false });
+const emptyDraft = (): QuoteDraft => ({ pendingId: generateId(), items: [], notes: '', dirty: false });
+
+/** Drafts stored before `pendingId` existed get one now. */
+function withPendingId(d: QuoteDraft): QuoteDraft {
+  return d.savedId || d.pendingId ? d : { ...d, pendingId: generateId() };
+}
 
 /**
  * In-progress quote for one user, persisted locally so a reload never loses work.
@@ -11,7 +17,7 @@ const emptyDraft = (): QuoteDraft => ({ items: [], notes: '', dirty: false });
  */
 export function useQuoteDraft(userId: UserId) {
   const key = `draft:v2:${userId}`;
-  const [draft, setDraft] = useState<QuoteDraft>(() => readJson(key, emptyDraft()));
+  const [draft, setDraft] = useState<QuoteDraft>(() => withPendingId(readJson(key, emptyDraft())));
 
   useEffect(() => writeJson(key, draft), [key, draft]);
 
@@ -25,7 +31,15 @@ export function useQuoteDraft(userId: UserId) {
       if (cancelled || exists !== false) return;
       setDraft((d) =>
         d.savedId === savedId
-          ? { ...d, savedId: undefined, quoteNumber: undefined, createdAt: undefined, status: undefined, dirty: true }
+          ? {
+              ...d,
+              savedId: undefined,
+              pendingId: generateId(),
+              quoteNumber: undefined,
+              createdAt: undefined,
+              status: undefined,
+              dirty: true,
+            }
           : d,
       );
     });
@@ -35,7 +49,8 @@ export function useQuoteDraft(userId: UserId) {
   }, [savedId, userId]);
 
   const addItem = useCallback(
-    (item: QuoteItem) => setDraft((d) => ({ ...d, items: [...d.items, item], dirty: true })),
+    (item: QuoteItem) =>
+      setDraft((d) => (d.items.length >= MAX_QUOTE_ITEMS ? d : { ...d, items: [...d.items, item], dirty: true })),
     [],
   );
   const removeItem = useCallback(
@@ -64,7 +79,7 @@ export function useQuoteDraft(userId: UserId) {
     const items = quote.items.map((i) => ({ ...i }));
     setDraft(
       asCopy
-        ? { items, notes: quote.notes ?? '', dirty: true }
+        ? { pendingId: generateId(), items, notes: quote.notes ?? '', dirty: true }
         : {
             savedId: quote.id,
             quoteNumber: quote.quoteNumber,

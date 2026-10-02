@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState, type FormEvent } from 'react';
 import { Minus, Plus } from 'lucide-react';
-import type { FieldToggles, Product, QuoteItem } from '../../types';
+import { MAX_QUOTE_ITEMS, type FieldToggles, type Product, type QuoteItem } from '../../types';
 import { useActiveUser } from '../../context/UserContext';
 import { useToast } from '../../context/ToastContext';
 import {
@@ -11,7 +11,7 @@ import {
   suggestValues,
   upsertProduct,
 } from '../../services/productService';
-import { formatCurrency, generateId } from '../../lib/utils';
+import { cn, formatCurrency, generateId } from '../../lib/utils';
 import { Button } from '../ui/Button';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { Field, Input } from '../ui/Input';
@@ -20,6 +20,8 @@ import { AutocompleteInput, type Suggestion } from './AutocompleteInput';
 interface QuoteBuilderProps {
   toggles: FieldToggles;
   onAddItem: (item: QuoteItem) => void;
+  /** Items already in the quote, to enforce MAX_QUOTE_ITEMS. */
+  itemCount: number;
 }
 
 /** `price` holds digits only; it's displayed with thousands separators. */
@@ -38,8 +40,10 @@ interface Removal {
 }
 
 const MAX_LISTED = 6;
+/** Up to 9.999.999.999: price × quantity (≤ 9999) stays exact in JavaScript numbers. */
+const MAX_PRICE_DIGITS = 10;
 
-export function QuoteBuilder({ toggles, onAddItem }: QuoteBuilderProps) {
+export function QuoteBuilder({ toggles, onAddItem, itemCount }: QuoteBuilderProps) {
   const user = useActiveUser();
   const notify = useToast();
   const [form, setForm] = useState(EMPTY);
@@ -134,6 +138,10 @@ export function QuoteBuilder({ toggles, onAddItem }: QuoteBuilderProps) {
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    if (itemCount >= MAX_QUOTE_ITEMS) {
+      notify(`Una cotización puede tener hasta ${MAX_QUOTE_ITEMS} ítems.`, 'error');
+      return;
+    }
     if (!hasDescription) {
       notify('Completá al menos el tipo, la marca o el modelo', 'error');
       return;
@@ -256,7 +264,7 @@ export function QuoteBuilder({ toggles, onAddItem }: QuoteBuilderProps) {
               leading={<span className="text-[15px] font-medium">$</span>}
               value={formatPriceInput(form.price)}
               onChange={(e) => {
-                set('price')(e.target.value.replace(/\D/g, '').replace(/^0+(?=\d)/, '').slice(0, 12));
+                set('price')(e.target.value.replace(/\D/g, '').replace(/^0+(?=\d)/, '').slice(0, MAX_PRICE_DIGITS));
                 setPriceTouched(true);
               }}
               onFocus={(e) => e.target.select()}
@@ -273,10 +281,24 @@ export function QuoteBuilder({ toggles, onAddItem }: QuoteBuilderProps) {
             {toggles.price ? formatCurrency(subtotal) : 'Sin precio'}
           </p>
         </div>
-        <Button type="submit" size="lg" loading={adding} icon={<Plus className="h-4 w-4" />} disabled={!hasDescription}>
+        <Button
+          type="submit"
+          size="lg"
+          loading={adding}
+          icon={<Plus className="h-4 w-4" />}
+          disabled={!hasDescription || itemCount >= MAX_QUOTE_ITEMS}
+        >
           Agregar
         </Button>
       </div>
+
+      {itemCount >= MAX_QUOTE_ITEMS - 20 && (
+        <p className={cn('text-xs', itemCount >= MAX_QUOTE_ITEMS ? 'text-red-600' : 'text-zinc-500')}>
+          {itemCount >= MAX_QUOTE_ITEMS
+            ? `Llegaste al máximo de ${MAX_QUOTE_ITEMS} ítems. Guardá esta cotización y seguí en una nueva.`
+            : `${itemCount} de ${MAX_QUOTE_ITEMS} ítems.`}
+        </p>
+      )}
 
       <ConfirmDialog
         open={removal !== null}

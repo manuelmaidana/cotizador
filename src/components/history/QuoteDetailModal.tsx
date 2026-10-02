@@ -36,8 +36,12 @@ export function QuoteDetailModal({ quote, onClose, onChanged, onDeleted, onOpenI
       // Re-export uses the company snapshot stored with the quote.
       const result = await exportQuotePdf(quote);
       if (result !== 'cancelled') {
-        const updated = await markQuoteExported(quote.id, quote.userId);
-        if (updated) onChanged(updated);
+        // Shown as exported right away; the status write completes in the background.
+        onChanged({ ...quote, status: 'exported' });
+        markQuoteExported(quote.id, quote.userId).catch((err) => {
+          console.error(err);
+          notify(`${quote.quoteNumber}: no se pudo marcar como exportada`, 'error');
+        });
         notify(result === 'shared' ? `${quote.quoteNumber} compartida` : `${quote.quoteNumber}.pdf descargado`);
       }
     } catch (err) {

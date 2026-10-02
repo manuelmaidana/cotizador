@@ -9,6 +9,7 @@ import {
 } from 'firebase/firestore';
 import type { UserId } from '../types';
 import { generateId } from '../lib/utils';
+import { withRetry, withTimeout } from '../lib/errors';
 import { COLLECTIONS, db } from './firebase';
 import { readJson, writeJson } from './storage';
 
@@ -20,7 +21,9 @@ import { readJson, writeJson } from './storage';
  */
 export const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 export const HEARTBEAT_MS = 5 * 60 * 1000;
-const TRANSACTION_TIMEOUT_MS = 10_000;
+const TRANSACTION_TIMEOUT_MS = 12_000;
+/** Total time a seller may wait when choosing their profile before seeing an error. */
+const CLAIM_DEADLINE_MS = 30_000;
 
 const sessionsCol = collection(db, COLLECTIONS.sessions);
 
@@ -90,22 +93,6 @@ export function isHeldByOther(session: SellerSession | undefined, deviceId = get
   return Date.now() - new Date(session.lastSeen).getTime() < SESSION_TTL_MS;
 }
 
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Firestore no respondió a tiempo')), ms);
-    promise.then(
-      (v) => {
-        clearTimeout(timer);
-        resolve(v);
-      },
-      (e) => {
-        clearTimeout(timer);
-        reject(e);
-      },
-    );
-  });
-}
-
 /* ---- Reads -------------------------------------------------------------------- */
 
 /** Live map of who holds each seller (for the seller selector). */
@@ -165,7 +152,9 @@ export type ClaimResult = { ok: true } | { ok: false; holder: SellerSession };
 export function claimSession(userId: UserId): Promise<ClaimResult> {
   const deviceId = getDeviceId();
   const ref = doc(sessionsCol, userId);
-  return withTimeout(
+  // Re-claiming from the same device is idempotent, so a slow attempt (weak signal) or a
+  // conflict with another device's simultaneous claim is simply retried.
+  return withRetry(() => withTimeout(
     runTransaction(db, async (tx): Promise<ClaimResult> => {
       const snap = await tx.get(ref);
       const data = snap.data();
@@ -190,7 +179,7 @@ export function claimSession(userId: UserId): Promise<ClaimResult> {
       return { ok: true };
     }),
     TRANSACTION_TIMEOUT_MS,
-  );
+  ), { attempts: 4, deadlineMs: CLAIM_DEADLINE_MS });
 }
 
 /** Keeps this device's hold alive. Never touches a session owned by someone else. */

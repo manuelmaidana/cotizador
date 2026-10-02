@@ -24,26 +24,11 @@ export function UserSelector() {
   const { selectUser, notice, dismissNotice } = useUser();
   const { company } = useCompany();
   const [sessions, setSessions] = useState<Partial<Record<UserId, SellerSession>>>({});
-  const [loaded, setLoaded] = useState(false);
   const [pending, setPending] = useState<UserId | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [, tick] = useState(0);
 
-  useEffect(() => {
-    const unsubscribe = subscribeSessions(
-      (s) => {
-        setSessions(s);
-        setLoaded(true);
-      },
-      () => setLoaded(true),
-    );
-    // Don't keep the buttons disabled forever without signal: the claim itself reports the problem.
-    const fallback = setTimeout(() => setLoaded(true), 4000);
-    return () => {
-      unsubscribe();
-      clearTimeout(fallback);
-    };
-  }, []);
+  useEffect(() => subscribeSessions(setSessions), []);
 
   // Refresh the "hace X min" texts and expiries every minute.
   useEffect(() => {
@@ -122,7 +107,8 @@ export function UserSelector() {
                 <button
                   type="button"
                   onClick={() => choose(user.id)}
-                  disabled={busy || pending !== null || !loaded}
+                  // Not blocked while the session list loads: claiming is checked on the server anyway.
+                  disabled={busy || pending !== null}
                   aria-describedby={busy ? `busy-${user.id}` : undefined}
                   className={cn(
                     'group flex w-full items-center gap-4 rounded-2xl bg-white p-4 text-left ring-1 ring-zinc-200/80 transition-[box-shadow,transform,opacity] duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600',

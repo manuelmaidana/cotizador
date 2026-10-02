@@ -9,6 +9,7 @@ import { markQuoteExported, saveQuote } from '../../services/quoteService';
 import { exportQuotePdf, preloadPdf } from '../../services/pdfLoader';
 import { readJson, writeJson } from '../../services/storage';
 import { cn, sumItems } from '../../lib/utils';
+import { userMessage } from '../../lib/errors';
 import { Button } from '../ui/Button';
 import { Card, CardHeader } from '../ui/Card';
 import { Field, Textarea } from '../ui/Input';
@@ -54,7 +55,7 @@ export function QuoteScreen({ draftApi }: { draftApi: QuoteDraftApi }) {
       notify(`${quote.quoteNumber} guardada en el historial`);
     } catch (err) {
       console.error(err);
-      notify('No se pudo guardar la cotización. Revisá la conexión.', 'error');
+      notify(userMessage(err, 'No se pudo guardar la cotización. Revisá la conexión.'), 'error');
     } finally {
       setBusy(null);
     }
@@ -68,7 +69,7 @@ export function QuoteScreen({ draftApi }: { draftApi: QuoteDraftApi }) {
       quote = await persist();
     } catch (err) {
       console.error(err);
-      notify('No se pudo guardar la cotización. Revisá la conexión.', 'error');
+      notify(userMessage(err, 'No se pudo guardar la cotización. Revisá la conexión.'), 'error');
       setBusy(null);
       return;
     }
@@ -79,8 +80,14 @@ export function QuoteScreen({ draftApi }: { draftApi: QuoteDraftApi }) {
         notify(`${quote.quoteNumber} guardada en el historial`);
         return;
       }
-      const exported = await markQuoteExported(quote.id, user.id);
-      if (exported) markSaved(exported);
+      // The PDF is out: show it as exported right away; the status write finishes in the
+      // background (it's already safe in the offline cache and syncs if the signal is poor).
+      const exportedQuote = quote;
+      markSaved({ ...exportedQuote, status: 'exported' });
+      markQuoteExported(exportedQuote.id, user.id).catch((err) => {
+        console.error(err);
+        notify(`${exportedQuote.quoteNumber}: no se pudo marcar como exportada. Volvé a exportarla.`, 'error');
+      });
       notify(
         result === 'shared'
           ? `${quote.quoteNumber} compartida y guardada como exportada`
@@ -110,7 +117,7 @@ export function QuoteScreen({ draftApi }: { draftApi: QuoteDraftApi }) {
             <CardHeader title="Agregar producto" description="Activá solo los campos que necesites." />
             <div className="flex flex-col gap-4 p-4">
               <DynamicOptionToggles value={toggles} onChange={updateToggles} />
-              <QuoteBuilder toggles={toggles} onAddItem={addItem} />
+              <QuoteBuilder toggles={toggles} onAddItem={addItem} itemCount={draft.items.length} />
             </div>
           </Card>
 

@@ -2,7 +2,6 @@ import {
   collection,
   doc,
   onSnapshot,
-  setDoc,
   Timestamp,
   writeBatch,
   type DocumentData,
@@ -77,7 +76,12 @@ function ensureCatalog(): Promise<void> {
       productsCol,
       { includeMetadataChanges: true },
       (snap) => {
-        catalog = new Map(snap.docs.map((d) => [d.id, fromDoc(d)]));
+        // Apply only what changed: with thousands of products and three sellers writing,
+        // rebuilding the whole map on every snapshot would keep the device busy.
+        for (const change of snap.docChanges()) {
+          if (change.type === 'removed') catalog.delete(change.doc.id);
+          else if (!pending.has(change.doc.id)) catalog.set(change.doc.id, fromDoc(change.doc));
+        }
         // The first snapshot may come from the (possibly empty) cache; that's fine for suggestions.
         done();
         if (!snap.metadata.fromCache && !seedChecked) {
@@ -149,8 +153,9 @@ export async function suggestValues(
     const prev = seen.get(key);
     if (!prev || prev.updatedAt < p.updatedAt) seen.set(key, { value: p[field], updatedAt: p.updatedAt });
   }
+  // An exact match stays in the list: picking it is harmless, and it keeps its delete (X)
+  // reachable when someone types the full name to find it.
   return [...seen.values()]
-    .filter((v) => normalize(v.value) !== q)
     .sort((a, b) => rank(a.value, query) - rank(b.value, query) || b.updatedAt.localeCompare(a.updatedAt))
     .slice(0, limit)
     .map((v) => v.value);
@@ -202,6 +207,8 @@ export async function productsMatching(field: 'type' | 'brand', value: string): 
  * Quotes keep their own copy of each item, so existing quotes are not affected.
  */
 export async function deleteProducts(ids: string[]): Promise<void> {
+  // A queued (not yet sent) upsert must not bring a deleted product back.
+  for (const id of ids) pending.delete(id);
   const commits: Promise<void>[] = [];
   for (let i = 0; i < ids.length; i += 400) {
     const batch = writeBatch(db);
@@ -229,14 +236,19 @@ export interface ProductInput {
   lastPrice: number;
 }
 
-/**
- * Inserts or updates a product (matched on type + brand + model) with its latest price.
- * Not awaited against the server: with offline persistence the write is queued locally
- * and the in-memory catalog updates immediately through the snapshot listener.
- */
-export async function upsertProduct(input: ProductInput, userId: UserId): Promise<Product> {
-  await ensureCatalog();
+/* ---------------------------------------------------------------------------
+ * Writes are queued and flushed in batches: adding 200 items in a row (or three sellers
+ * adding at once) produces a handful of batched writes instead of hundreds of single
+ * ones, which kept the Firestore client busy and slowed down saving. The local catalog
+ * is updated immediately, so suggestions on this device never wait for the flush.
+ * ------------------------------------------------------------------------- */
+const FLUSH_DELAY_MS = 2000;
+const pending = new Map<string, Record<string, unknown>>();
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+function enqueue(input: ProductInput, userId: UserId): Product | null {
   const clean = { type: input.type.trim(), brand: input.brand.trim(), model: input.model.trim() };
+  if (!clean.model) return null;
   const id = productId(clean);
   const existing = catalog.get(id);
   const now = Timestamp.now();
@@ -246,12 +258,10 @@ export async function upsertProduct(input: ProductInput, userId: UserId): Promis
     updatedAt: now,
     searchKey: buildSearchKey(clean),
     // Only the first creator is recorded.
-    ...(existing ? {} : { createdByUser: userId }),
+    ...(existing || pending.get(id)?.createdByUser ? {} : { createdByUser: userId }),
   };
-  setDoc(doc(productsCol, id), data, { merge: true }).catch((err) =>
-    console.error('No se pudo guardar el producto', err),
-  );
-  return {
+  pending.set(id, { ...pending.get(id), ...data });
+  const product: Product = {
     id,
     ...clean,
     lastPrice: input.lastPrice,
@@ -259,4 +269,54 @@ export async function upsertProduct(input: ProductInput, userId: UserId): Promis
     createdByUser: existing?.createdByUser ?? userId,
     searchKey: data.searchKey,
   };
+  catalog.set(id, product);
+  return product;
+}
+
+function scheduleFlush(delay: number) {
+  if (flushTimer) clearTimeout(flushTimer);
+  flushTimer = setTimeout(flushProducts, delay);
+}
+
+/** Sends every queued product write now (in batches of up to 400). */
+export function flushProducts(): void {
+  if (flushTimer) clearTimeout(flushTimer);
+  flushTimer = null;
+  const entries = [...pending.entries()];
+  pending.clear();
+  for (let i = 0; i < entries.length; i += 400) {
+    const batch = writeBatch(db);
+    for (const [id, data] of entries.slice(i, i + 400)) batch.set(doc(productsCol, id), data, { merge: true });
+    // Not awaited: offline the batch is queued by Firestore and syncs later.
+    batch.commit().catch((err) => console.error('No se pudieron guardar los productos', err));
+  }
+}
+
+// Don't lose queued writes if the tab is closed or sent to the background.
+if (typeof window !== 'undefined') {
+  window.addEventListener('pagehide', flushProducts);
+  document.addEventListener('visibilitychange', () => document.visibilityState === 'hidden' && flushProducts());
+}
+
+/**
+ * Upserts many products at once (e.g. every item of a saved quote) and sends them right
+ * away in one batch. Duplicates in the input collapse to the last price.
+ */
+export async function upsertProducts(inputs: ProductInput[], userId: UserId): Promise<void> {
+  await ensureCatalog();
+  for (const input of inputs) enqueue(input, userId);
+  flushProducts();
+}
+
+/**
+ * Inserts or updates a product (matched on type + brand + model) with its latest price.
+ * Visible in this device's suggestions immediately; shared with the other sellers within
+ * a couple of seconds (next batched flush).
+ */
+export async function upsertProduct(input: ProductInput, userId: UserId): Promise<Product> {
+  await ensureCatalog();
+  const product = enqueue(input, userId);
+  scheduleFlush(FLUSH_DELAY_MS);
+  if (!product) throw new Error('Producto sin modelo');
+  return product;
 }

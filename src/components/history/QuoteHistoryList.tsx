@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ChevronRight, FilePlus2, FileText, Search } from 'lucide-react';
 import type { Quote, QuoteStatus } from '../../types';
 import { useActiveUser } from '../../context/UserContext';
-import { subscribeQuotesByUser } from '../../services/quoteService';
+import { findQuoteByNumber, HISTORY_PAGE_SIZE, subscribeQuotesByUser } from '../../services/quoteService';
 import { cn, describeItem, formatCurrency, formatDate, normalize } from '../../lib/utils';
 import { Button } from '../ui/Button';
 import { Input } from '../ui/Input';
@@ -25,33 +25,77 @@ interface QuoteHistoryListProps {
 export function QuoteHistoryList({ onOpenInEditor, onNewQuote }: QuoteHistoryListProps) {
   const user = useActiveUser();
   const [quotes, setQuotes] = useState<Quote[] | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const [pageLimit, setPageLimit] = useState(HISTORY_PAGE_SIZE);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadError, setLoadError] = useState(false);
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState<StatusFilter>('all');
   const [selected, setSelected] = useState<Quote | null>(null);
+  const [remoteMatch, setRemoteMatch] = useState<Quote | null>(null);
 
-  // Live: quotes saved or exported on any device appear without reopening the screen.
+  // Live and paginated: only the most recent quotes are loaded ("Ver más" loads older ones),
+  // so the screen stays fast with thousands of quotes. New ones appear without reopening.
   useEffect(() => {
-    setQuotes(null);
-    return subscribeQuotesByUser(user.id, (result) => {
-      setQuotes(result);
-      // Keep an open detail sheet in sync with the latest data.
-      setSelected((current) => (current ? (result.find((q) => q.id === current.id) ?? null) : null));
-    });
-  }, [user.id]);
+    setLoadError(false);
+    return subscribeQuotesByUser(
+      user.id,
+      pageLimit,
+      (page) => {
+        setQuotes(page.quotes);
+        setHasMore(page.hasMore);
+        setLoadingMore(false);
+        // Keep an open detail sheet in sync with the latest data.
+        setSelected((current) => (current ? (page.quotes.find((q) => q.id === current.id) ?? current) : null));
+      },
+      () => {
+        setLoadError(true);
+        setLoadingMore(false);
+        setQuotes((prev) => prev ?? []);
+      },
+    );
+  }, [user.id, pageLimit]);
+
+  // Search text per quote, computed once per data change rather than on every keystroke.
+  const haystacks = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const quote of quotes ?? []) {
+      // Quote number, date (dd/mm/yyyy) and every product in it.
+      map.set(quote.id, normalize([quote.quoteNumber, formatDate(quote.createdAt), ...quote.items.map(describeItem)].join(' ')));
+    }
+    return map;
+  }, [quotes]);
 
   const filtered = useMemo(() => {
     if (!quotes) return [];
     const q = normalize(query);
     return quotes.filter((quote) => {
       if (status !== 'all' && quote.status !== status) return false;
-      if (!q) return true;
-      // Match quote number, date (dd/mm/yyyy) or any product in it.
-      const haystack = normalize(
-        [quote.quoteNumber, formatDate(quote.createdAt), ...quote.items.map(describeItem)].join(' '),
-      );
-      return haystack.includes(q);
+      return !q || (haystacks.get(quote.id) ?? '').includes(q);
     });
-  }, [quotes, query, status]);
+  }, [quotes, haystacks, query, status]);
+
+  // A full quote number not among the loaded pages is looked up directly in Firestore.
+  const exactNumber = /^cot-\d{4}-\d{4,}$/i.test(query.trim()) ? query.trim().toUpperCase() : null;
+  const needsRemote = Boolean(exactNumber && quotes && !quotes.some((q) => q.quoteNumber === exactNumber));
+  useEffect(() => {
+    setRemoteMatch(null);
+    if (!needsRemote || !exactNumber) return;
+    let cancelled = false;
+    findQuoteByNumber(user.id, exactNumber)
+      .then((found) => !cancelled && setRemoteMatch(found))
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [needsRemote, exactNumber, user.id]);
+
+  const visible = remoteMatch && needsRemote ? [remoteMatch] : filtered;
+
+  const loadMore = () => {
+    setLoadingMore(true);
+    setPageLimit((n) => n + HISTORY_PAGE_SIZE);
+  };
 
   const replaceQuote = (updated: Quote) => {
     setQuotes((prev) => prev?.map((q) => (q.id === updated.id ? updated : q)) ?? prev);
@@ -106,15 +150,25 @@ export function QuoteHistoryList({ onOpenInEditor, onNewQuote }: QuoteHistoryLis
             Nueva Cotización
           </Button>
         </div>
-      ) : filtered.length === 0 ? (
-        <p className="py-10 text-center text-sm text-zinc-500">Sin resultados para esta búsqueda.</p>
+      ) : visible.length === 0 ? (
+        <div className="flex flex-col items-center gap-3 py-10 text-center">
+          <p className="text-sm text-zinc-500">
+            {hasMore ? 'Sin resultados entre las cotizaciones cargadas.' : 'Sin resultados para esta búsqueda.'}
+          </p>
+          {hasMore && (
+            <Button variant="secondary" loading={loadingMore} onClick={loadMore}>
+              Buscar en cotizaciones anteriores
+            </Button>
+          )}
+        </div>
       ) : (
         <>
           <p className="px-1 text-[13px] text-zinc-500">
-            {filtered.length} {filtered.length === 1 ? 'cotización' : 'cotizaciones'}
+            {visible.length} {visible.length === 1 ? 'cotización' : 'cotizaciones'}
+            {hasMore && !remoteMatch && ' · mostrando las más recientes'}
           </p>
           <ul className="flex flex-col gap-2">
-            {filtered.map((quote) => {
+            {visible.map((quote) => {
               const units = quote.items.reduce((acc, i) => acc + i.quantity, 0);
               return (
                 <li key={quote.id}>
@@ -129,7 +183,7 @@ export function QuoteHistoryList({ onOpenInEditor, onNewQuote }: QuoteHistoryLis
                         <StatusBadge status={quote.status} />
                       </div>
                       <p className="mt-0.5 truncate text-[13px] text-zinc-500">
-                        {quote.items.map((i) => i.model || i.brand || i.type).join(', ')}
+                        {summarizeItems(quote)}
                       </p>
                       <p className="mt-1 text-xs tabular-nums text-zinc-400">
                         {formatDate(quote.createdAt, true)} · {units} {units === 1 ? 'unidad' : 'unidades'}
@@ -146,7 +200,18 @@ export function QuoteHistoryList({ onOpenInEditor, onNewQuote }: QuoteHistoryLis
               );
             })}
           </ul>
+          {hasMore && !remoteMatch && (
+            <Button variant="secondary" size="lg" loading={loadingMore} onClick={loadMore}>
+              Ver más
+            </Button>
+          )}
         </>
+      )}
+
+      {loadError && (
+        <p className="text-center text-xs text-zinc-400">
+          No se pudo actualizar el historial. Se muestra lo último disponible en este dispositivo.
+        </p>
       )}
 
       <QuoteDetailModal
@@ -158,4 +223,11 @@ export function QuoteHistoryList({ onOpenInEditor, onNewQuote }: QuoteHistoryLis
       />
     </div>
   );
+}
+
+/** First few product names of a quote ("A, B, C y 197 más"), cheap even for huge quotes. */
+function summarizeItems(quote: Quote): string {
+  const names = quote.items.slice(0, 4).map((i) => i.model || i.brand || i.type);
+  const rest = quote.items.length - names.length;
+  return rest > 0 ? `${names.join(', ')} y ${rest} más` : names.join(', ');
 }

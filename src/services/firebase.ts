@@ -1,5 +1,10 @@
 import { initializeApp } from 'firebase/app';
-import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager } from 'firebase/firestore';
+import {
+  connectFirestoreEmulator,
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
+} from 'firebase/firestore';
 import { missingFirebaseEnv } from '../lib/firebaseEnv';
 
 const firebaseConfig = {
@@ -29,6 +34,14 @@ export const db = initializeFirestore(app, {
   localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
   ignoreUndefinedProperties: true,
 });
+
+// Local testing only: VITE_FIRESTORE_EMULATOR=127.0.0.1:8080 points the app at the
+// Firestore emulator instead of production. Never set on the deployed site.
+const emulator = import.meta.env.VITE_FIRESTORE_EMULATOR;
+if (emulator) {
+  const [host, port] = emulator.split(':');
+  connectFirestoreEmulator(db, host, Number(port));
+}
 
 export const COLLECTIONS = {
   products: 'products',
