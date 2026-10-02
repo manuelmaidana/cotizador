@@ -12,9 +12,9 @@ import {
 } from '../services/sessionService';
 
 export const USERS: AppUser[] = [
-  { id: 'chino', name: 'Chino', initials: 'CH', tone: 'bg-brand-600 text-white' },
+  { id: 'roberto', name: 'Roberto', initials: 'RO', tone: 'bg-brand-600 text-white' },
   { id: 'damian', name: 'Damian', initials: 'DA', tone: 'bg-zinc-900 text-white' },
-  { id: 'rulo', name: 'Rulo', initials: 'RU', tone: 'bg-emerald-600 text-white' },
+  { id: 'antonio', name: 'Antonio', initials: 'AN', tone: 'bg-emerald-600 text-white' },
 ];
 
 const STORAGE_KEY = 'activeUser';

@@ -3,3 +3,9 @@ dist
 *.local
 .env*
 !.env.example
+
+# Backups and the admin key contain business data / full database access: never commit them.
+respaldo-*.json
+*-firebase-adminsdk-*.json
+clave-admin*.json
+service-account*.json

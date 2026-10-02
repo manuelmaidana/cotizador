@@ -8,9 +8,9 @@ This document serves as the master specification, architecture blueprint, comman
 
 ### Core Purpose
 A mobile-first web application designed for on-the-go quotation generation. Built for three specific sales representatives:
-- **Chino**
+- **Roberto**
 - **Damian**
-- **Rulo**
+- **Antonio**
 
 Each quote includes dynamic product configurations, predictive autocomplete from historically saved products, live table previews, PDF export, cloud persistence, and strict per-user quote history isolation.
 
@@ -62,7 +62,7 @@ interface Product {
   model: string;           // e.g. "iPhone 15 Pro 128GB", "Galaxy S24"
   lastPrice: number;       // Last suggested or added unit price
   updatedAt: Timestamp;    // Last quotation date
-  createdByUser: string;   // "chino" | "damian" | "rulo"
+  createdByUser: string;   // "roberto" | "damian" | "antonio"
   searchKey: string;       // Lowercase concatenated string for indexed search
 }
 ```
@@ -83,8 +83,8 @@ interface QuoteItem {
 interface Quote {
   id: string;              // Firestore document ID
   quoteNumber: string;     // Formatted sequential number (e.g., "COT-2026-0042")
-  userId: "chino" | "damian" | "rulo";
-  userName: "Chino" | "Damian" | "Rulo";
+  userId: "roberto" | "damian" | "antonio";
+  userName: "Roberto" | "Damian" | "Antonio";
   createdAt: Timestamp;
   status: "saved" | "exported";
   items: QuoteItem[];
@@ -133,7 +133,7 @@ interface CompanyConfig {
 ### Standardized Spanish UI Vocabulary:
 - **Profile / Login Screen**:
   - Title: *"¿Quién está cotizando hoy?"* / *"Seleccionar Usuario"*
-  - Users: `Chino`, `Damian`, `Rulo`
+  - Users: `Roberto`, `Damian`, `Antonio`
 - **Quotation Form & Fields**:
   - `Tipo` (e.g. *Celular, Computadora, Accesorio, Repuesto*)
   - `Marca` (e.g. *Apple, Samsung, Motorola, Xiaomi*)
@@ -147,7 +147,7 @@ interface CompanyConfig {
   - Document Title: *"COTIZACIÓN"*
   - Document Number: *"Cotización N°: [COT-YYYYMMDD-XXXX]"*
   - Date: *"Fecha: DD/MM/AAAA"*
-  - Author Badge: *"Cotizado por: [Chino / Damian / Rulo]"*
+  - Author Badge: *"Cotizado por: [Roberto / Damian / Antonio]"*
   - Table Headers: `Cant.` | `Descripción (Tipo / Marca / Modelo)` | `P. Unitario` | `Subtotal`
   - Summary: *"Total Cotización: $X.XXX"*
   - Contact Labels: *"Teléfono"*, *"Dirección"*, *"Correo Electrónico"*, *"Instagram"*, *"Sitio Web"*
@@ -173,7 +173,7 @@ interface CompanyConfig {
 ## 5. Key Functional Requirements
 
 1. **User Selection Screen**:
-   - Screen displayed upon entering the app with 3 avatar cards: **Chino**, **Damian**, and **Rulo**.
+   - Screen displayed upon entering the app with 3 avatar cards: **Roberto**, **Damian**, and **Antonio**.
    - Selected user is saved in `localStorage` for session persistence with a quick "Cambiar Usuario" option in the header.
 2. **Quotation History Isolation**:
    - Each user can **only view their own quotations**.
@@ -264,7 +264,7 @@ cotizador/
 │   │   ├── layout/
 │   │   │   ├── Header.tsx           # App bar with user badge & hamburger trigger
 │   │   │   ├── NavigationDrawer.tsx # Mobile slide-out drawer
-│   │   │   └── UserSelector.tsx     # Chino / Damian / Rulo avatar picker
+│   │   │   └── UserSelector.tsx     # Roberto / Damian / Antonio avatar picker
 │   │   ├── quote/
 │   │   │   ├── QuoteBuilder.tsx     # Main quote form with dynamic fields
 │   │   │   ├── AutocompleteInput.tsx# Predictive text suggestion dropdown
@@ -304,7 +304,7 @@ cotizador/
 - Tested in mobile viewport (375px) with all UI strings in Spanish.
 - Clean service layer architecture in `src/services/` (`quoteService.ts`, `productService.ts`, `companyService.ts`).
 - PDF generation with `jspdf` and Web Share API verified.
-- User switching (Chino, Damian, Rulo) and quote history isolation verified.
+- User switching (Roberto, Damian, Antonio) and quote history isolation verified.
 
 ### Next Step: Backend Migration to Firebase Firestore
 All UI components talk exclusively to asynchronous service files in `src/services/`. The migration only requires:

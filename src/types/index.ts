@@ -1,5 +1,5 @@
-export type UserId = 'chino' | 'damian' | 'rulo';
-export type UserName = 'Chino' | 'Damian' | 'Rulo';
+export type UserId = 'roberto' | 'damian' | 'antonio';
+export type UserName = 'Roberto' | 'Damian' | 'Antonio';
 
 export interface AppUser {
   id: UserId;

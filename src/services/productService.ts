@@ -43,7 +43,7 @@ function fromDoc(snap: QueryDocumentSnapshot<DocumentData>): Product {
     model: d.model ?? '',
     lastPrice: typeof d.lastPrice === 'number' ? d.lastPrice : 0,
     updatedAt: d.updatedAt instanceof Timestamp ? d.updatedAt.toDate().toISOString() : new Date(0).toISOString(),
-    createdByUser: d.createdByUser ?? 'chino',
+    createdByUser: d.createdByUser ?? 'roberto',
     searchKey: d.searchKey ?? buildSearchKey(d as Product),
   };
 }
@@ -105,7 +105,7 @@ async function seedProducts() {
     batch.set(doc(productsCol, productId(p)), {
       ...p,
       updatedAt: now,
-      createdByUser: 'chino' satisfies UserId,
+      createdByUser: 'roberto' satisfies UserId,
       searchKey: buildSearchKey(p),
     });
   }

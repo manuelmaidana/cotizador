@@ -8,11 +8,11 @@ service cloud.firestore {
   match /databases/{database}/documents {
 
     function isSeller(id) {
-      return id in ['chino', 'damian', 'rulo'];
+      return id in ['roberto', 'damian', 'antonio'];
     }
 
     function sellerName(id) {
-      return {'chino': 'Chino', 'damian': 'Damian', 'rulo': 'Rulo'}[id];
+      return {'roberto': 'Roberto', 'damian': 'Damian', 'antonio': 'Antonio'}[id];
     }
 
     function shortString(v) {
@@ -71,7 +71,9 @@ service cloud.firestore {
         && request.resource.data.updatedAt is timestamp
         && request.resource.data.searchKey is string
         && request.resource.data.searchKey.size() <= 1000
-        && isSeller(request.resource.data.createdByUser);
+        && (isSeller(request.resource.data.createdByUser)
+          // Products created before the sellers were renamed keep their original creator.
+          || request.resource.data.createdByUser in ['chino', 'rulo']);
 
       // Sellers can remove saved suggestions (the app always asks for confirmation).
       // Quotes keep their own copy of each item, so deleting a product never alters a quote.

@@ -290,7 +290,7 @@ export async function buildQuotePdf(quote: Quote): Promise<jsPDF> {
     doc.setFontSize(7.5);
     setColor(doc, 'text', COLORS.muted);
     doc.text('Precios sujetos a modificación sin previo aviso.', MARGIN, pageHeight - 10);
-    doc.text(`${quote.quoteNumber}  ·  Página ${i} de ${pageCount}`, pageWidth - MARGIN, pageHeight - 10, {
+    doc.text(`Cotizado por ${quote.userName}  ·  ${quote.quoteNumber}  ·  Página ${i} de ${pageCount}`, pageWidth - MARGIN, pageHeight - 10, {
       align: 'right',
     });
   }

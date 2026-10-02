@@ -7,6 +7,7 @@ import { DEFAULT_COMPANY } from '../../services/companyService';
 import { Button } from '../ui/Button';
 import { Card, CardHeader } from '../ui/Card';
 import { Field, Input } from '../ui/Input';
+import { BackupCard } from './BackupCard';
 
 /** Downscales an uploaded logo so it fits comfortably in localStorage (and later, Firestore). */
 function fileToResizedDataUrl(file: File, maxSize = 320): Promise<string> {
@@ -127,6 +128,8 @@ export function CompanyConfigForm() {
           ))}
         </div>
       </Card>
+
+      <BackupCard />
 
       <p className="px-1 text-xs text-zinc-500">
         Las cotizaciones ya guardadas conservan los datos de la empresa del momento en que se crearon.
