@@ -19,7 +19,7 @@ import { readJson, writeJson } from './storage';
  * no session, or when the holder hasn't been active for SESSION_TTL_MS (app closed/offline).
  * While the app is open the holder refreshes `lastSeen` every HEARTBEAT_MS.
  */
-export const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+export const SESSION_TTL_MS = 1 * 60 * 60 * 1000;
 export const HEARTBEAT_MS = 5 * 60 * 1000;
 const TRANSACTION_TIMEOUT_MS = 12_000;
 /** Total time a seller may wait when choosing their profile before seeing an error. */
