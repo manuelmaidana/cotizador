@@ -83,7 +83,7 @@ service cloud.firestore {
     // ---- sessions: one device per seller ---------------------------------
     // sessions/{userId} = { deviceId, deviceLabel, claimedAt, lastSeen }.
     // A seller can be taken by another device only once the holder has been
-    // inactive for 1 hour. `lastSeen` must be the server time of the write.
+    // inactive for 15 minutes. `lastSeen` must be the server time of the write.
     function validSession(s) {
       return s.keys().hasOnly(['deviceId', 'deviceLabel', 'claimedAt', 'lastSeen'])
         && s.deviceId is string && s.deviceId.size() > 0 && s.deviceId.size() <= 100
@@ -101,7 +101,7 @@ service cloud.firestore {
           // Heartbeat / re-claim from the same device.
           request.resource.data.deviceId == resource.data.deviceId
           // Takeover of an expired hold.
-          || resource.data.lastSeen < request.time - duration.value(1, 'h')
+          || resource.data.lastSeen < request.time - duration.value(15, 'm')
         );
 
       // "Cambiar Usuario" frees the seller (the app only deletes its own session).
